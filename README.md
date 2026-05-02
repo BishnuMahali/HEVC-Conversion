@@ -38,7 +38,7 @@ Designed to reduce file size while preserving quality — with **built-in valida
 Place the script in your video folder and run:
 
 ```powershell
-.\script.ps1
+.\script.ps1```
 
 ---
 
