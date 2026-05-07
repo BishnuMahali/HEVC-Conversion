@@ -20,7 +20,14 @@ do {
 
 } while (-not $valid)
 
+# --- File Filtering Variables ---
+$global:knownVideoExtensions = @('.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v', '.ts', '.vob', '.m2ts', '.mpeg', '.mpg', '.rm', '.rmvb', '.3gp', '.3g2', '.ogv')
+$global:knownIgnoredExtensions = @('.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff', '.tif', '.heic', '.ico', '.svg', '.psd', '.ai', '.txt', '.log', '.pdf', '.zip', '.rar', '.7z', '.iso', '.ps1', '.md', '.json', '.csv', '.xml', '.ini', '.cfg', '.yaml', '.yml', '.html', '.css', '.js', '.db', '.sqlite', '.bak')
+
 Get-ChildItem -File | ForEach-Object {
+
+    # Ignore Unoptimizable folder and its contents
+    if ($_.DirectoryName -match "Unoptimizable") { return }
 
     $input = $_.FullName
     $dir = $_.DirectoryName
@@ -32,14 +39,26 @@ Get-ChildItem -File | ForEach-Object {
 
     Write-Host "`nChecking: $($_.Name)"
 
-    # --- Detect video stream ---
-    $hasVideo = (ffprobe -v error -select_streams v `
-        -show_entries stream=index `
-        -of csv=p=0 "$input" | Out-String).Trim()
-
-    if ([string]::IsNullOrWhiteSpace($hasVideo)) {
-        Write-Host "⏭️ Skipped (not a video file)"
+    # --- Fast Extension-based filtering ---
+    $fileExt = $_.Extension.ToLower()
+    if ($global:knownIgnoredExtensions -contains $fileExt) {
+        Write-Host "⏭️ Skipped (known non-video extension: $fileExt)"
         return
+    }
+
+    if ($global:knownVideoExtensions -notcontains $fileExt) {
+        Write-Host "🔍 Unknown extension '$fileExt', verifying with ffprobe..."
+        $hasVideo = (ffprobe -v error -select_streams v -show_entries stream=index -of csv=p=0 "$input" | Out-String).Trim()
+        $formatName = (ffprobe -v error -show_entries format=format_name -of default=nokey=1:noprint_wrappers=1 "$input" | Out-String).Trim()
+
+        if ([string]::IsNullOrWhiteSpace($hasVideo) -or $formatName -match 'image|pipe|gif') {
+            Write-Host "⏭️ Skipped (verified non-video file)"
+            $global:knownIgnoredExtensions += $fileExt
+            return
+        } else {
+            Write-Host "✅ Verified as video file. Added '$fileExt' to known video formats."
+            $global:knownVideoExtensions += $fileExt
+        }
     }
 
     Write-Host "🎬 Processing video: $($_.Name)"

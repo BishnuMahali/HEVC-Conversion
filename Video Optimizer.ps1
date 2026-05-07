@@ -38,6 +38,11 @@ if (($availableEncoders | Where-Object ID -eq $selectedEncoderId).Codec -match "
 $audioAction = "Copy" # Copy, AAC 128k
 $container = "Original" # Original, MKV, MP4
 
+# --- File Filtering Variables ---
+$knownVideoExtensions = @('.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v', '.ts', '.vob', '.m2ts', '.mpeg', '.mpg', '.rm', '.rmvb', '.3gp', '.3g2', '.ogv')
+$knownIgnoredExtensions = @('.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff', '.tif', '.heic', '.ico', '.svg', '.psd', '.ai', '.txt', '.log', '.pdf', '.zip', '.rar', '.7z', '.iso', '.ps1', '.md', '.json', '.csv', '.xml', '.ini', '.cfg', '.yaml', '.yml', '.html', '.css', '.js', '.db', '.sqlite', '.bak')
+
+
 # --- Helper Functions ---
 function Show-Menu {
     Clear-Host
@@ -147,6 +152,9 @@ foreach ($file in $files) {
     if ($file.FullName -eq $logFile) { continue }
     if ($file.Name -match "_backup") { continue }
 
+    # Ignore Unoptimizable folder and its contents
+    if ($file.DirectoryName -match "Unoptimizable") { continue }
+
     $input = $file.FullName
     $dir = $file.DirectoryName
     $name = [System.IO.Path]::GetFileNameWithoutExtension($file.Name)
@@ -158,12 +166,28 @@ foreach ($file in $files) {
 
     Write-Host "`nChecking: $($file.Name)"
 
-    # --- Detect video ---
-    $hasVideo = (ffprobe -v error -select_streams v -show_entries stream=index -of csv=p=0 "$input" | Out-String).Trim()
-    if ([string]::IsNullOrWhiteSpace($hasVideo)) {
-        Write-Host "⏭️ Skipped (not a video file)"
+    # --- Fast Extension-based filtering ---
+    $fileExt = $file.Extension.ToLower()
+    if ($knownIgnoredExtensions -contains $fileExt) {
+        Write-Host "⏭️ Skipped (known non-video extension: $fileExt)"
         $skippedCount++
         continue
+    }
+
+    if ($knownVideoExtensions -notcontains $fileExt) {
+        Write-Host "🔍 Unknown extension '$fileExt', verifying with ffprobe..."
+        $hasVideo = (ffprobe -v error -select_streams v -show_entries stream=index -of csv=p=0 "$input" | Out-String).Trim()
+        $formatName = (ffprobe -v error -show_entries format=format_name -of default=nokey=1:noprint_wrappers=1 "$input" | Out-String).Trim()
+
+        if ([string]::IsNullOrWhiteSpace($hasVideo) -or $formatName -match 'image|pipe|gif') {
+            Write-Host "⏭️ Skipped (verified non-video file)"
+            $knownIgnoredExtensions += $fileExt
+            $skippedCount++
+            continue
+        } else {
+            Write-Host "✅ Verified as video file. Added '$fileExt' to known video formats."
+            $knownVideoExtensions += $fileExt
+        }
     }
 
     # --- Detect codec ---
