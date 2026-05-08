@@ -1,5 +1,5 @@
 # Ultimate Video Optimizer
-# Version: 1.0.0
+# Version: 1.0.2
 # MIT License
 # Copyright (c) 2026 Bishnu Mahali
 # See LICENSE file in the repository root for full license text.
@@ -35,7 +35,6 @@ foreach ($enc in $availableEncoders) {
     if ($ffmpegEncoders -match "\b$($enc.Codec)\b") {
         # FFmpeg binary supports the codec, but does the hardware?
         # Run a 1-frame dummy encode to verify actual GPU support.
-        # We use a standard resolution and pixel format to ensure encoder initialization.
         $dummyArgs = @("-v", "error", "-f", "lavfi", "-i", "color=black:s=640x480:r=24", "-pix_fmt", "yuv420p", "-vframes", "1", "-c:v", $enc.Codec, "-f", "null", "-")
         $global:LASTEXITCODE = 0
         $null = & ffmpeg @dummyArgs 2>&1
@@ -47,8 +46,9 @@ foreach ($enc in $availableEncoders) {
 }
 
 # --- State Variables ---
-$targetFolder = $PWD.Path
-$recursive = $true # Changed to true by default
+# Use GetUnresolvedProviderPathFromPSPath to handle relative paths and provider-qualified paths robustly
+$targetFolder = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath(".\")
+$recursive = $true # Enabled by default
 
 # --- Preset Options ---
 $presetOptions = @{
@@ -95,10 +95,10 @@ $knownIgnoredExtensions = @('.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.
 function Write-BoxHeader {
     param([string]$Title, [string]$Color = "Cyan")
     $len = $Title.Length + 4
-    $line = "═" * $len
-    Write-Host "╔$line╗" -ForegroundColor $Color
-    Write-Host "║  $Title  ║" -ForegroundColor $Color
-    Write-Host "╚$line╝" -ForegroundColor $Color
+    $line = "=" * $len
+    Write-Host "+$line+" -ForegroundColor $Color
+    Write-Host "|  $Title  |" -ForegroundColor $Color
+    Write-Host "+$line+" -ForegroundColor $Color
 }
 
 function Write-Status {
@@ -134,12 +134,13 @@ while ($runningMenu) {
         Write-Host $Value -ForegroundColor $valColor
 
         if ($Hint) {
-            Write-Host "        └─ $Hint" -ForegroundColor DarkGray
+            Write-Host "        L- $Hint" -ForegroundColor DarkGray
         }
     }
 
     Draw-MenuItem 0 "Target Folder" $targetFolder
-    Draw-MenuItem 1 "Recursive" ($recursive ? 'Yes' : 'No')
+    $recursiveDisplay = if ($recursive) { 'Yes' } else { 'No' }
+    Draw-MenuItem 1 "Recursive" $recursiveDisplay
     Draw-MenuItem 2 "Encoder" "$($activeEnc.Name) ($($activeEnc.Codec))"
 
     $qHint = switch -regex ($activeEnc.Codec) {
@@ -158,7 +159,8 @@ while ($runningMenu) {
         "libx265"   { "Options: ultrafast to placebo (slow=recommended)" }
         Default { "Enter encoder-specific preset" }
     }
-    Draw-MenuItem 4 "Preset" $(if($preset){$preset}else{'None'}) $pHint
+    $presetDisplay = if ($preset) { $preset } else { 'None' }
+    Draw-MenuItem 4 "Preset" $presetDisplay $pHint
 
     Draw-MenuItem 5 "Audio Action" $audioAction
     Draw-MenuItem 6 "Container" $container
@@ -177,7 +179,7 @@ while ($runningMenu) {
     if ($selectedIndex -eq 9) { Write-Host " > [ Quit ]" -ForegroundColor Red }
     else { Write-Host "   [ Quit ]" -ForegroundColor DarkRed }
 
-    Write-Host "`n─────────────────────────────────────────────" -ForegroundColor Gray
+    Write-Host "`n---------------------------------------------" -ForegroundColor Gray
     Write-Host " Navigation : [Up/Down]   Change Value: [Left/Right]" -ForegroundColor Gray
     Write-Host " Edit/Enter : [Enter]     (Target, Quality, Preset, Custom Folder)" -ForegroundColor Gray
 
@@ -342,9 +344,17 @@ Clear-Host
 Write-BoxHeader "OPTIMIZATION IN PROGRESS" "Green"
 Write-Host ""
 Write-Status "Target" "$targetFolder"
-Write-Status "Mode" "$(if($recursive){'Recursive'}else{'Single Folder'})"
+$modeDisplay = if ($recursive) { 'Recursive' } else { 'Single Folder' }
+Write-Status "Mode" $modeDisplay
 Write-Status "Encoder" "$videoCodec (Quality: $quality, Preset: $preset)"
-Write-Host "─────────────────────────────────────────────" -ForegroundColor Gray
+Write-Host "---------------------------------------------" -ForegroundColor Gray
+
+# Ensure target folder exists and is absolute
+$targetFolder = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($targetFolder)
+if (-not (Test-Path -LiteralPath $targetFolder -PathType Container)) {
+    Write-Host " [ERROR] Target folder not found or is not a directory." -ForegroundColor Red
+    return
+}
 
 $logFile = Join-Path $targetFolder "Optimization_Log.txt"
 Add-Content -Path $logFile -Value "`n========================================"
@@ -357,18 +367,27 @@ $processedCount = 0
 $skippedCount = 0
 $failedCount = 0
 
-# Force array context and use LiteralPath
-$files = @(if ($recursive) { Get-ChildItem -LiteralPath $targetFolder -File -Recurse } else { Get-ChildItem -LiteralPath $targetFolder -File })
+# --- File Discovery ---
+Write-Host " Scanning for files..." -ForegroundColor Gray
+$gciArgs = @{
+    LiteralPath = $targetFolder
+    File = $true
+    ErrorAction = 'SilentlyContinue'
+}
+if ($recursive) { $gciArgs.Recurse = $true }
+
+$files = @(Get-ChildItem @gciArgs)
 $totalFiles = $files.Count
 $qualityList = $quality -split ','
 $currentFileIndex = 0
 $global:currentTempOutput = ""
 
-Write-Host " 🔍 Found $totalFiles files to check..." -ForegroundColor Gray
-
 if ($totalFiles -eq 0) {
-    Write-Host "`n ⚠️  No files found to process in the target directory." -ForegroundColor Yellow
+    Write-Host "`n [WARNING] No files found to process in the target directory." -ForegroundColor Yellow
+    Write-Host "    Target: $targetFolder" -ForegroundColor Gray
+    Write-Host "    Recursive: $modeDisplay" -ForegroundColor Gray
 } else {
+    Write-Host " [INFO] Found $totalFiles files to check." -ForegroundColor Gray
     try {
         foreach ($file in $files) {
             $currentFileIndex++
@@ -386,21 +405,21 @@ if ($totalFiles -eq 0) {
             # --- Fast Extension-based filtering ---
             $fileExt = $file.Extension.ToLower()
             if ($knownIgnoredExtensions -contains $fileExt) {
-                Write-Host "  └─ ⏭️  Skipped (non-video extension)" -ForegroundColor Gray
+                Write-Host "  L- Skipped (non-video extension)" -ForegroundColor Gray
                 $skippedCount++
                 continue
             }
 
             if ($knownVideoExtensions -notcontains $fileExt) {
-                Write-Host "  └─ 🔍 Verifying with ffprobe..." -ForegroundColor Gray
+                Write-Host "  L- Verifying with ffprobe..." -ForegroundColor Gray
                 $hasVideo = (ffprobe -v error -select_streams v -show_entries stream=index -of csv=p=0 "$input" 2>$null | Out-String).Trim()
                 if ([string]::IsNullOrWhiteSpace($hasVideo)) {
-                    Write-Host "  └─ ⏭️  Skipped (verified non-video)" -ForegroundColor Gray
+                    Write-Host "  L- Skipped (verified non-video)" -ForegroundColor Gray
                     if ($fileExt -and $knownIgnoredExtensions -notcontains $fileExt) { $knownIgnoredExtensions += $fileExt }
                     $skippedCount++
                     continue
                 } else {
-                    Write-Host "  └─ ✅ Verified video format" -ForegroundColor Gray
+                    Write-Host "  L- Verified video format" -ForegroundColor Gray
                     if ($fileExt -and $knownVideoExtensions -notcontains $fileExt) { $knownVideoExtensions += $fileExt }
                 }
             }
@@ -410,12 +429,12 @@ if ($totalFiles -eq 0) {
             $aCodec = (ffprobe -v error -select_streams a:0 -show_entries stream=codec_name -of csv=p=0 "$input" 2>$null | Out-String).Trim()
 
             if ($vCodec -match "hevc|av1") {
-                Write-Host "  └─ ⏭️  Skipped (already efficient: $vCodec)" -ForegroundColor Gray
+                Write-Host "  L- Skipped (already efficient: $vCodec)" -ForegroundColor Gray
                 $skippedCount++
                 continue
             }
 
-            Write-Host "  └─ 🎬 Codecs: [V:$vCodec, A:$aCodec]" -ForegroundColor Gray
+            Write-Host "  L- Codecs: [V:$vCodec, A:$aCodec]" -ForegroundColor Gray
 
             # --- Finalize Paths ---
             $finalExt = if ($container -eq "Original") { $file.Extension } else { ".$($container.ToLower())" }
@@ -434,7 +453,7 @@ if ($totalFiles -eq 0) {
                 $incompatible = $false
                 if ($finalExt -eq ".mp4" -and $aCodec -notmatch "aac|mp3|opus|ac3|eac3|mp2|mp1") { $incompatible = $true }
                 elseif ($finalExt -eq ".mov" -and $aCodec -notmatch "aac|mp3|ac3|eac3|alac|pcm") { $incompatible = $true }
-                if ($incompatible) { $targetAudioCodec = "aac"; $targetAudioBitrate = "128k"; Write-Host "  └─ ⚠️  Audio incompatible. Encoding to AAC." -ForegroundColor Yellow }
+                if ($incompatible) { $targetAudioCodec = "aac"; $targetAudioBitrate = "128k"; Write-Host "  L- Audio incompatible. Encoding to AAC." -ForegroundColor Yellow }
             }
 
             $success = $false
@@ -445,7 +464,7 @@ if ($totalFiles -eq 0) {
             for ($i = 0; $i -lt $qualityList.Length; $i++) {
                 $q = $qualityList[$i]
                 $passInfo = if ($qualityList.Length -gt 1) { "(Pass $($i + 1)/$($qualityList.Length))" } else { "" }
-                Write-Host "  └─ ▶️  Optimizing $passInfo [Q:$q]... " -NoNewline -ForegroundColor Cyan
+                Write-Host "  L- Optimizing $passInfo [Q:$q]... " -NoNewline -ForegroundColor Cyan
 
                 $ffArgs = @("-y", "-loglevel", "error", "-stats")
                 if ($videoCodec -match "nvenc") { $ffArgs += @("-hwaccel","cuda") }
@@ -488,7 +507,7 @@ if ($totalFiles -eq 0) {
                 }
 
                 if ($ffmpegExit -ne 0) {
-                    Write-Host "     ❌ FFmpeg error ($ffmpegExit)" -ForegroundColor Red
+                    Write-Host "     [ERROR] FFmpeg error ($ffmpegExit)" -ForegroundColor Red
                     if (Test-Path -LiteralPath $tempOutput) { Remove-Item -LiteralPath $tempOutput -Force }
                     $unoptimizable = $true; $unoptReason = "FFmpeg error"; break
                 }
@@ -506,17 +525,17 @@ if ($totalFiles -eq 0) {
                             if ($outSize -lt $inSize) {
                                 $diffMB = [math]::Round(($inSize - $outSize) / 1MB, 2)
                                 $percent = [math]::Round((($inSize - $outSize) / $inSize) * 100, 2)
-                                Write-Host "     📊 Saved: ${diffMB}MB (${percent}%)" -ForegroundColor Green
+                                Write-Host "     Saved: ${diffMB}MB (${percent}%)" -ForegroundColor Green
                                 $success = $true; $successfulQuality = $q
                                 $totalInBytes += $inSize; $totalOutBytes += $outSize
                                 break
                             } else {
-                                Write-Host "     ⚠️  Output larger than source" -ForegroundColor Yellow
+                                Write-Host "     [WARNING] Output larger than source" -ForegroundColor Yellow
                                 if ($i -eq ($qualityList.Length - 1)) { $unoptimizable = $true; $unoptReason = "Larger than source" }
                                 else { if (Test-Path -LiteralPath $tempOutput) { Remove-Item -LiteralPath $tempOutput -Force } }
                             }
                         } else {
-                            Write-Host "     ⚠️  Duration mismatch" -ForegroundColor Red
+                            Write-Host "     [WARNING] Duration mismatch" -ForegroundColor Red
                             $unoptimizable = $true; $unoptReason = "Duration mismatch"; break
                         }
                     } else {
@@ -525,7 +544,7 @@ if ($totalFiles -eq 0) {
                         break
                     }
                 } else {
-                    Write-Host "     ❌ Verification failed" -ForegroundColor Red
+                    Write-Host "     [ERROR] Verification failed" -ForegroundColor Red
                     $unoptimizable = $true; $unoptReason = "Verification failed"; break
                 }
             }
@@ -561,15 +580,14 @@ if ($totalFiles -eq 0) {
 }
 
 $totalSavedMB = [math]::Round(($totalInBytes - $totalOutBytes) / 1MB, 2)
-Write-Host "`n─────────────────────────────────────────────" -ForegroundColor Gray
+Write-Host "`n---------------------------------------------" -ForegroundColor Gray
 Write-BoxHeader "OPTIMIZATION COMPLETE" "Cyan"
 Write-Host ""
 Write-Status "Success " "$processedCount files" "Green"
 Write-Status "Skipped " "$skippedCount files" "Yellow"
 Write-Status "Failed  " "$failedCount files" "Red"
 Write-Host ""
-Write-Host " ╔═══════════════════════════════════════╗" -ForegroundColor Cyan
-Write-Host " ║  Total Space Saved: $totalSavedMB MB  ║" -ForegroundColor Cyan
-Write-Host " ╚═══════════════════════════════════════╝" -ForegroundColor Cyan
+Write-Host "+---------------------------------------+" -ForegroundColor Cyan
+Write-Host "|  Total Space Saved: $totalSavedMB MB  |" -ForegroundColor Cyan
+Write-Host "+---------------------------------------+" -ForegroundColor Cyan
 Write-Host ""
-
