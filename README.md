@@ -1,65 +1,84 @@
-# 🎬 Ultimate Video Optimizer (PowerShell)
+# 🎬 Ultimate Video Optimizer
 
-A **safe, automated, and interactive video optimization script** using FFmpeg to convert videos into **efficient HEVC (H.265) or AV1** formats.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Platform: Windows](https://img.shields.io/badge/Platform-Windows-blue.svg)](https://www.microsoft.com/windows)
+[![PowerShell: 5.1+](https://img.shields.io/badge/PowerShell-5.1+-blue.svg)](https://microsoft.com/powershell)
 
-Designed to reduce file size while preserving quality — with **built-in validation, safety checks, and an interactive menu**.
-
----
-
-## ✨ Features
-
-- 🎯 Converts videos to **HEVC (H.265)** or **AV1**.
-- 🎛️ **Interactive Menu** to configure settings on the fly: Target Folder, Recursive Mode, Encoder, Quality, Preset, Audio Action, Container, and Failed Action.
-- 🚀 **Hardware Acceleration Support** for NVIDIA (NVENC), AMD (AMF), Intel (QSV), and CPU (AV1 SVT, HEVC libx265).
-- 📂 **Recursive Directory Scanning** to process nested folders.
-- ⚙️ **Configurable Settings** including quality control (CRF, CQ, QP, etc.), presets, audio handling with smart MP4/MOV compatibility validation and automatic AAC fallback, and output containers (Original, MKV, MP4, MOV).
-- 🔄 **Multi-Pass Quality Fallback** allows providing up to 3 quality values (e.g., `23,27,30`). If the first setting results in a file larger than the source, the script automatically attempts the next.
-- 🧾 **Unoptimizable Cache** remembers files kept in place after failed attempts and skips retrying them when the encoder settings have not changed.
-- 📊 Shows size comparison after encoding.
-- 🧠 Skips already efficient codecs (HEVC / AV1).
-- 🔍 Validates output (size + duration check).
-- 🔁 **Safe replacement system** (with backup).
-- 🚫 Detects failed or inefficient conversions.
-- 📁 **Configurable Failed Actions**: Choose to Move to 'Unoptimizable', Move to a Custom Folder, Delete the File, or Ignore (Keep Original).
-- 🧼 Cleans up temp files automatically.
+A **professional-grade, interactive PowerShell utility** designed to automate the mass-optimization of video libraries. It leverages FFmpeg to convert videos into ultra-efficient **HEVC (H.265)** or **AV1** formats, significantly reducing file size while maintaining visual fidelity.
 
 ---
 
-## ⚙️ Requirements
+## 🌟 Why Ultimate Video Optimizer?
 
-- Windows PowerShell **5.1+**
-- FFmpeg with:
-  - `ffmpeg`
-  - `ffprobe`
-- For hardware acceleration: A supported NVIDIA, AMD, or Intel GPU.
+Unlike simple "one-click" converters, this tool is built for **power users and creators** who need to process hundreds of files safely.
 
-👉 Download FFmpeg: https://ffmpeg.org/download.html
+- **Intelligence First:** Automatically detects your hardware (NVIDIA, AMD, Intel) and picks the fastest encoder.
+- **Safety Guaranteed:** Uses a **Verify-then-Swap** workflow. It never deletes an original file unless the optimized version is verified for size, duration, and integrity.
+- **Smart Logic:** Automatically skips files that are already efficient (HEVC/AV1) or that have failed optimization with your current settings in the past.
+- **No Installation:** Runs directly from your terminal or via a single `.bat` file.
 
 ---
 
-## 📦 Usage
+## 🚀 Quick Start
 
-Double-click `Video Optimizer.bat` to launch the optimizer with the newest PowerShell available on your system. The launcher prefers PowerShell 7+ (`pwsh.exe`) when installed and falls back to Windows PowerShell.
-
-You can also run the script directly and use the interactive menu to configure your settings before starting the optimization process:
-
+### 1. Recommended: Run via Web (Zero Download)
+Open Windows Terminal in your video folder and run:
 ```powershell
-.\"Video Optimizer.ps1"
+irm https://raw.githubusercontent.com/BishnuMahali/Video-Optimizer/main/Video%20Optimizer.ps1 | iex
 ```
 
-### Failed File Cache
+### 2. Standard Launch
+Double-click `Video Optimizer.bat` or run `.\Video Optimizer.ps1` in PowerShell.
 
-When **Failed Action** is set to **Ignore (Keep Original)**, the script writes `Optimization_Cache.json` in the selected target folder. If the same file is scanned again with the same encoder, quality, preset, audio, and container settings, it is skipped instead of being reprocessed. Changing those settings, or modifying the file, allows it to be tried again.
+---
 
-### Multi-Pass Fallback Example
-In the interactive menu, when prompted for **Quality**, enter a comma-separated list of values (up to 3):
-```text
-Enter new quality value or up to 3 comma-separated values (e.g., 23,27,30): 23,26,28
-```
-This tells the script to encode at quality `23` first. If the output is larger than the original video, it cleans up and attempts `26`, and finally `28` if necessary.
+## 🧠 How It Works (The Technical Workflow)
+
+The script follows a rigorous 6-stage pipeline for every file:
+
+1.  **Detection:** Identifies hardware acceleration support (NVENC, AMF, QSV) via dummy encodes.
+2.  **Analysis:** Checks source codec, duration, and metadata using `ffprobe`.
+3.  **Optimization:** Executes FFmpeg with your chosen quality/preset. 
+4.  **Verification:** Compares output vs. input duration (±2s) and file size.
+5.  **Multi-Pass Fallback:** If the output is larger than the original, it automatically retries with a lower quality setting (if provided).
+6.  **Atomic Replacement:** Only if verified, it replaces the original file with the optimized version using an atomic swap to prevent data loss.
+
+---
+
+## ⚙️ Configuration & Encoders
+
+### Supported Encoders
+
+| Hardware | Encoder | Codec | Best For |
+| :--- | :--- | :--- | :--- |
+| **NVIDIA** | `av1_nvenc`, `hevc_nvenc` | AV1 / HEVC | Maximum speed & efficiency |
+| **Intel** | `av1_qsv`, `hevc_qsv` | AV1 / HEVC | High-quality QuickSync encoding |
+| **AMD** | `av1_amf`, `hevc_amf` | AV1 / HEVC | Radeon GPU acceleration |
+| **CPU** | `libsvtav1`, `libx265` | AV1 / HEVC | Maximum quality (slowest) |
+
+### Key Features Explained
+
+- **Multi-Pass Quality:** Enter `23,27,31`. If `23` results in a larger file, it immediately tries `27`, ensuring you never waste space.
+- **Audio Actions:** Choose to `Copy` original audio or re-encode to `AAC`, `Opus`, or `AC3`. It automatically fixes MP4/MOV compatibility issues.
+- **Unoptimizable Cache:** Remembers files that couldn't be compressed and skips them in future runs to save time.
+- **Failed Actions:** Configure what happens to files that can't be optimized:
+    - 📁 Move to a dedicated "Unoptimizable" folder.
+    - 🗑️ Delete them (useful for temp/proxy cleanup).
+    - 🛑 Ignore and keep in place.
+
+---
+
+## 🛠️ Requirements
+
+- **Windows 10/11** (PowerShell 5.1 or 7+)
+- **FFmpeg** (Must be in your system `PATH`)
+    - [Download FFmpeg here](https://ffmpeg.org/download.html)
+- **Optional:** NVIDIA/AMD/Intel GPU for hardware acceleration.
 
 ---
 
 ## 📜 License
 
-This project is licensed under the MIT License — see the LICENSE file for details.
+This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
+
+Copyright (c) 2026 Bishnu Mahali
