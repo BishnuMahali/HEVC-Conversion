@@ -78,7 +78,7 @@ $quality = "23,26,29"
 $currentPresets = Get-PresetList $defaultEnc.Codec
 $preset = if ($defaultEnc.Codec -match "nvenc") { "p5" } elseif ($defaultEnc.Codec -match "libsvtav1") { "6" } elseif ($defaultEnc.Codec -match "libx265|libx264") { "slow" } else { $currentPresets[0] }
 
-$audioAction = "AAC 128k"
+$audioAction = "Copy"
 $container = "MP4"
 
 # Failed file handling
@@ -176,10 +176,12 @@ function Save-UnoptimizableCache {
 $hasVmaf = (ffmpeg -filters 2>&1 | Out-String) -match "libvmaf"
 $vmafEnabled = $true
 $vmafTarget = 93
-$vmafMinCQ = 10
-$vmafMaxCQ = 48
+$vmafMinCQ = 0
+$vmafMaxCQ = 51
 $vmafStep = 4
-$stepOptions = @(1, 2, 3, 4, 5, 6)
+$vmafSampleDuration = 5
+$vmafSampleCount = 3
+$stepOptions = @(1, 2, 3, 4, 5, 6, 8)
 
 function Get-VmafScore {
     param(
@@ -189,46 +191,67 @@ function Get-VmafScore {
         [string]$Preset
     )
 
-    $sampleDuration = 5
-    $tempSampleSource = Join-Path $env:TEMP ("vmaf_src_" + [guid]::NewGuid().ToString().Substring(0,8) + ".mkv")
-    $tempSampleEncoded = Join-Path $env:TEMP ("vmaf_enc_" + [guid]::NewGuid().ToString().Substring(0,8) + ".mkv")
-
+    $scores = @()
+    
     try {
-        # 1. Get duration and pick middle
+        # 1. Get duration
         $durationStr = (ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$InputPath" 2>$null | Out-String).Trim()
         if (-not $durationStr) { return 0 }
         $duration = [double]::Parse($durationStr, [System.Globalization.CultureInfo]::InvariantCulture)
-        $startTime = [math]::Max(0, ($duration / 2) - ($sampleDuration / 2))
-
-        # 2. Extract 5s sample
-        & ffmpeg -y -loglevel error -ss $startTime -t $sampleDuration -i $InputPath -map 0:v:0 -c:v copy "$tempSampleSource"
         
-        # 3. Encode sample
-        $activeEnc = ($availableEncoders | Where-Object Codec -eq $Codec)
-        $mode = $activeEnc.Mode
-        $ffArgs = @("-y", "-loglevel", "error", "-i", $tempSampleSource, "-c:v", $Codec)
-        
-        switch ($mode) {
-            "crf" { $ffArgs += @("-crf", $CQ) }
-            "cq"  { $ffArgs += @("-cq", $CQ, "-b:v", "0") }
-            "qp"  { $ffArgs += @("-qp", $CQ) }
-            "global_quality" { $ffArgs += @("-global_quality", $CQ) }
+        # 2. Determine sample points
+        $samplePoints = @()
+        if ($vmafSampleCount -eq 1) {
+            $samplePoints += [math]::Max(0, ($duration / 2) - ($vmafSampleDuration / 2))
+        } else {
+            $step = $duration / ($vmafSampleCount + 1)
+            for ($i = 1; $i -le $vmafSampleCount; $i++) {
+                $samplePoints += [math]::Max(0, ($step * $i) - ($vmafSampleDuration / 2))
+            }
         }
-        if ($Preset) { $ffArgs += @("-preset", $Preset) }
-        $ffArgs += $tempSampleEncoded
-        & ffmpeg @ffArgs
 
-        # 4. Run VMAF comparison
-        $vmafOut = (ffmpeg -i $tempSampleEncoded -i $tempSampleSource -filter_complex "libvmaf" -f null - 2>&1 | Out-String)
-        
-        if ($vmafOut -match "VMAF score: (\d+\.\d+)") {
-            return [double]$matches[1]
+        foreach ($startTime in $samplePoints) {
+            $tempSampleSource = Join-Path $env:TEMP ("vmaf_src_" + [guid]::NewGuid().ToString().Substring(0,8) + ".mkv")
+            $tempSampleEncoded = Join-Path $env:TEMP ("vmaf_enc_" + [guid]::NewGuid().ToString().Substring(0,8) + ".mkv")
+
+            try {
+                # 3. Extract sample
+                & ffmpeg -y -loglevel error -ss $startTime -t $vmafSampleDuration -i $InputPath -map 0:v:0 -an -c:v copy "$tempSampleSource"
+                
+                # 4. Encode sample
+                $activeEnc = ($availableEncoders | Where-Object Codec -eq $Codec)
+                $mode = $activeEnc.Mode
+                $ffArgs = @("-y", "-loglevel", "error", "-i", $tempSampleSource, "-c:v", $Codec)
+                
+                switch ($mode) {
+                    "crf" { $ffArgs += @("-crf", $CQ) }
+                    "cq"  { $ffArgs += @("-cq", $CQ, "-b:v", "0") }
+                    "qp"  { $ffArgs += @("-qp", $CQ) }
+                    "global_quality" { $ffArgs += @("-global_quality", $CQ) }
+                }
+                if ($Preset) { $ffArgs += @("-preset", $Preset) }
+                $ffArgs += $tempSampleEncoded
+                & ffmpeg @ffArgs
+
+                # 5. Run VMAF comparison
+                $vmafOut = (ffmpeg -i $tempSampleEncoded -i $tempSampleSource -filter_complex "libvmaf" -f null - 2>&1 | Out-String)
+                
+                if ($vmafOut -match "VMAF score: (\d+\.\d+)") {
+                    $scores += [double]$matches[1]
+                }
+            } finally {
+                if (Test-Path $tempSampleSource) { Remove-Item $tempSampleSource -Force }
+                if (Test-Path $tempSampleEncoded) { Remove-Item $tempSampleEncoded -Force }
+            }
+        }
+
+        if ($scores.Count -gt 0) {
+            $total = 0
+            foreach ($s in $scores) { $total += $s }
+            return $total / $scores.Count
         }
     } catch {
         return 0
-    } finally {
-        if (Test-Path $tempSampleSource) { Remove-Item $tempSampleSource -Force }
-        if (Test-Path $tempSampleEncoded) { Remove-Item $tempSampleEncoded -Force }
     }
     return 0
 }
@@ -327,15 +350,17 @@ while ($runningMenu) {
     $items += @{ Label = "Recursive"; Value = $recursiveDisplay; Hint = "" }
     
     $vmafDisplay = if ($vmafEnabled) { "Enabled" } else { "Disabled" }
-    $vmafHint = if (-not $hasVmaf) { "Requires ffmpeg with libvmaf support!" } else { "Finds perfect quality for each file" }
+    $vmafHint = if (-not $hasVmaf) { "Requires ffmpeg with libvmaf support!" } else { "Finds perfect quality for each file. [Rec: 1-3 Samples, 3-5s Probe, Target 93-95]" }
     $items += @{ Label = "Advanced VMAF"; Value = $vmafDisplay; Hint = $vmafHint }
 
     $items += @{ Label = "Encoder"; Value = "$($activeEnc.Name) ($($activeEnc.Codec))"; Hint = "" }
 
     if ($vmafEnabled) {
-        $items += @{ Label = "Target VMAF"; Value = $vmafTarget; Hint = "Visual quality goal (93 = visually lossless)" }
-        $items += @{ Label = "CQ Range"; Value = "$vmafMinCQ to $vmafMaxCQ"; Hint = "Min/Max quality search boundaries" }
-        $items += @{ Label = "Search Step"; Value = "$vmafStep points"; Hint = "How many CQ points to jump per pass" }
+        $items += @{ Label = "Target VMAF"; Value = $vmafTarget; Hint = "Visual Quality Goal. Reccommended: 90-95 (93=lossless). Higher = Better Quality, Larger File." }
+        $items += @{ Label = "CQ Range"; Value = "$vmafMinCQ to $vmafMaxCQ"; Hint = "Search Bounds. Reccommended: 15-45. Wider Range = Higher Chance for exact target but Slower." }
+        $items += @{ Label = "Search Step"; Value = "$vmafStep points"; Hint = "CQ Points Skipped Per Pass. Recommended: 3-5. Larger = Faster Search." }
+        $items += @{ Label = "VMAF Samples"; Value = $vmafSampleCount; Hint = "Probes Per Video. Recommended: 1-3. More samples = Better Accuracy but Significantly Slower." }
+        $items += @{ Label = "Probe Duration"; Value = "$vmafSampleDuration sec"; Hint = "Seconds Per Sample. Recommended: 3-5s. Longer = Better Accuracy, Slower Encoding." }
     } else {
         $qHint = switch -regex ($activeEnc.Codec) {
             "nvenc" { "Recommended: 23,26,29 (CQ)" }
@@ -418,6 +443,8 @@ while ($runningMenu) {
                     $idx = ($idx - 1 + $stepOptions.Count) % $stepOptions.Count
                     $vmafStep = $stepOptions[$idx]
                 }
+                "VMAF Samples" { $vmafSampleCount = [math]::Max(1, $vmafSampleCount - 1) }
+                "Probe Duration" { $vmafSampleDuration = [math]::Max(1, $vmafSampleDuration - 1) }
                 "Quality" {  }
                 "Preset" {
                     $currentPresets = Get-PresetList $activeEnc.Codec
@@ -473,6 +500,8 @@ while ($runningMenu) {
                     $idx = ($idx + 1) % $stepOptions.Count
                     $vmafStep = $stepOptions[$idx]
                 }
+                "VMAF Samples" { $vmafSampleCount = [math]::Min(10, $vmafSampleCount + 1) }
+                "Probe Duration" { $vmafSampleDuration = [math]::Min(60, $vmafSampleDuration + 1) }
                 "Quality" {  }
                 "Preset" {
                     $currentPresets = Get-PresetList $activeEnc.Codec
@@ -543,6 +572,16 @@ while ($runningMenu) {
                         $min = Read-Host "Enter Min CQ (e.g. 15)"
                         $max = Read-Host "Enter Max CQ (e.g. 40)"
                         if ($min -as [int] -and $max -as [int] -and $min -lt $max) { $vmafMinCQ = [int]$min; $vmafMaxCQ = [int]$max }
+                    }
+                    "VMAF Samples" {
+                        Write-Host "`n"
+                        $newCount = Read-Host "Enter number of samples (1-10)"
+                        if ($newCount -as [int] -and $newCount -ge 1 -and $newCount -le 10) { $vmafSampleCount = [int]$newCount }
+                    }
+                    "Probe Duration" {
+                        Write-Host "`n"
+                        $newDur = Read-Host "Enter probe duration in seconds (1-60)"
+                        if ($newDur -as [int] -and $newDur -ge 1 -and $newDur -le 60) { $vmafSampleDuration = [int]$newDur }
                     }
                     "Preset" {
                         Write-Host "`n"
