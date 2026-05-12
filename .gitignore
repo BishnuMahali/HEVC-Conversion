@@ -1,3 +1,31 @@
-GEMINI.md
-Optimization_Log.txt
-Optimization_Cache.json
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+bin/
+lib/
+include/
+pydoc/
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Video Optimizer Specific
+.Video Optimizer/
+.Video-Optimizer/
+SNAPSHOT/
+BETA/
+*.tmp*
+*_opt.*
+
+# PowerShell
+*.log
+Video-Optimizer-GUI.ps1
+Video-Optimizer-GUI-Fixed.ps1
+Video-Optimizer-GUI-Fixed-Snapshot.ps1

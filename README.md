@@ -1,89 +1,59 @@
-# 🎬 Ultimate Video Optimizer v2.0.0
+# 🎬 Ultimate Video Optimizer Pro v2.5.0 (Ultimate Edition)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Platform: Windows](https://img.shields.io/badge/Platform-Windows-blue.svg)](https://www.microsoft.com/windows)
-[![PowerShell: 5.1+](https://img.shields.io/badge/PowerShell-5.1+-blue.svg)](microsoft.com/powershell)
+[![Python: 3.10+](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://python.org)
 
-A **professional-grade, interactive PowerShell utility** designed for high-precision mass-optimization of video libraries. Version 2.0 introduces the **Dynamic VMAF Engine**, allowing you to target specific perceptual quality levels rather than guessing bitrates.
-
----
-
-## 🚀 What's New in v2.0 (The VMAF Update)
-
-- **Dynamic VMAF Optimization:** Automatically finds the perfect Constant Quality (CQ) value for *every* video using Netflix's VMAF algorithm. 
-- **Adaptive TUI:** A brand new, fully dynamic terminal interface that evolves based on your chosen settings.
-- **Hybrid Precision Search:** Uses a dynamic stepping algorithm (up to 15 passes on small samples) to home in on your exact visual quality target.
-- **Professional Reporting:** Features a beautifully designed ASCII summary table and VMAF-aware logging.
-- **Improved Performance:** Optimized GPU workflows for NVIDIA (NVENC), Intel (QSV), and AMD (AMF).
+A **professional-grade, hardware-accelerated video optimization suite**. This version introduces the major **Python Pro GUI**, offering a significant leap in stability, visual fidelity, and advanced quality-targeting over the legacy PowerShell scripts.
 
 ---
 
-## 🌟 Why Use VMAF?
+## 🚀 The Ultimate Upgrade (v2.5.0)
 
-Traditional optimization uses a fixed bitrate or CRF, which often wastes space on simple videos (cartoons) or loses detail on complex ones (action movies). 
+This release marks the transition to **Python as the primary interface**, while retaining the core high-performance FFmpeg logic that made the PowerShell version a success.
 
-The **Dynamic VMAF Engine** in version 2.0:
-1. Extracts a 5-second sample from the video.
-2. Performs multiple test encodes at different quality levels.
-3. Measures the visual score using `libvmaf`.
-4. Selects the absolute best quality value to ensure **visual transparency** (indistinguishable from source) while maximizing file savings.
+### 🌟 New Python GUI Features:
+- **Professional Desktop Interface:** Built with `CustomTkinter` for a sleek, system-aware Light/Dark mode experience.
+- **VMAF Target Ladder (Multi-Pass):** Automatically hunt for the perfect visual quality. Input targets like `95, 93, 91` and the engine will iterate until the optimal size-to-quality ratio is found.
+- **Persistent Config System:** All settings (Encoders, Presets, Quality, Paths) are now saved automatically to `.Video Optimizer/config.json`.
+- **Smart Encoder Intelligence:** Auto-detects all supported hardware encoders (NVIDIA NVENC, AMD AMF, Intel QSV) and marks unsupported ones.
+- **Beautified Real-Time Logs:** High-fidelity console output with professional status prefixes and detailed process feedback.
+- **Robust Cache & Resume:** Integrated signature-based caching to prevent redundant processing of already optimized files.
 
-### ⚠️ Important Note on Low-Quality Sources (Preserving the Noise)
-VMAF is a reference-based metric. It measures how identical the new encode is to your original file. If your source video is old and low-quality (with blockiness, banding, or heavy noise), modern encoders will waste a massive amount of data trying to perfectly clone those ugly artifacts to hit your VMAF target. 
-**Recommendation:** For old or low-quality sources, **disable Advanced VMAF** and use a static Quality setting (like CQ 26 or 28). This allows the encoder to naturally smooth over artifacts rather than mathematically cloning them, resulting in better compression.
-
----
-
-## 🚀 Quick Start
-
-### 1. Recommended: Run via Web (Zero Download)
-Open Windows Terminal in your video folder and run:
-```powershell
-irm https://raw.githubusercontent.com/BishnuMahali/Video-Optimizer/main/Video%20Optimizer.ps1 | iex
-```
-
-### 2. Standard Launch
-Double-click `Video Optimizer.bat` or run `.\Video Optimizer.ps1` in PowerShell.
-
----
-
-## 🧠 How It Works (The Technical Workflow)
-
-1.  **Hardware Detection:** Probes your system for NVIDIA, AMD, or Intel GPU acceleration.
-2.  **VMAF Probing:** If enabled, the script performs a "hunt" for the optimal quality value using a dynamic hybrid search on a mid-video sample.
-3.  **Optimization:** Executes a high-speed GPU-accelerated encode using the precisely calculated CQ value.
-4.  **Verification:** Validates output duration and ensures the new file is smaller than the original.
-5.  **Atomic Swap:** Safely replaces the original file with the optimized version only after all checks pass.
-
----
-
-## ⚙️ Configuration & Encoders
-
-### Advanced VMAF Settings
-
-| Setting | Default | Description |
-| :--- | :--- | :--- |
-| **Target VMAF** | `93` | Perceptual goal. 93-95 is visually lossless. |
-| **CQ Range** | `10 - 48` | Search boundaries from high-fidelity to high-compression. |
-| **Search Step** | `4` | Initial jump size for the quality hunt. |
-
-### Supported Encoders
-
-| Hardware | Encoder | Codec |
-| :--- | :--- | :--- |
-| **NVIDIA** | `av1_nvenc`, `hevc_nvenc` | Ultra-fast GPU acceleration |
-| **Intel** | `av1_qsv`, `hevc_qsv` | QuickSync high-efficiency encoding |
-| **AMD** | `av1_amf`, `hevc_amf` | Radeon GPU acceleration |
-| **CPU** | `libsvtav1`, `libx265` | Maximum precision software encoding |
+### ⚙️ Engine Restoration (Best-in-Class Logic):
+- **Full Hardware Parity:** Matches the original PowerShell script's hardware detection and logic.
+- **GPU-Accelerated Decoding:** Uses `-hwaccel` flags to ensure the GPU handles both decoding AND encoding for maximum throughput.
+- **NVENC Visual Tuning:** Automatically injects `-spatial_aq` and `-aq-strength` for superior NVIDIA encoding quality.
+- **Audio Compatibility Fallback:** Intelligent stream analysis automatically falls back to high-quality AAC if source audio is incompatible with the target container.
 
 ---
 
 ## 🛠️ Requirements
 
-- **Windows 10/11** (PowerShell 5.1 or 7+)
+- **Windows 10/11**
 - **FFmpeg** (Must be in your system `PATH`)
     - [Download FFmpeg here](https://ffmpeg.org/download.html)
-    - *Note: Ensure your FFmpeg build includes `libvmaf` support (included in most "full" builds).*
+    - *Crucial: Build must include `libvmaf` for advanced quality targeting.*
+- **Python 3.10+** (The launcher handles virtual environment setup automatically)
+
+---
+
+## 🚀 Quick Start (GUI)
+
+1.  **Launch:** Double-click `Video Optimizer.bat`.
+2.  **Select:** Choose your source directory.
+3.  **Optimize:** Configure your quality targets (or use the recommended VMAF 93) and click **START PRO OPTIMIZATION**.
+
+---
+
+## 💻 PowerShell Mode (Legacy/CLI)
+
+The original PowerShell engine remains available for CLI-focused workflows. It can be run directly or via the web:
+
+### Quick Run (IRM):
+```powershell
+irm https://raw.githubusercontent.com/BishnuMahali/Video-Optimizer/main/Video-Optimizer.ps1 | iex
+```
 
 ---
 

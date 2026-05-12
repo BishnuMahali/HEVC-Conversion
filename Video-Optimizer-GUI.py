@@ -1,0 +1,1047 @@
+import os
+import sys
+import json
+import time
+import uuid
+import threading
+import subprocess
+import customtkinter as ctk
+from tkinter import filedialog, ttk
+from pathlib import Path
+from datetime import datetime
+
+def bootstrap():
+    """Detect if running in venv, if not look for '.venv' and restart."""
+    if hasattr(sys, 'real_prefix') or (sys.base_prefix != sys.prefix):
+        return  # Already in venv
+    
+    # Check for .venv in the current directory
+    venv_dir = Path(".venv")
+    if os.name == 'nt':
+        python_exe = venv_dir / "Scripts" / "python.exe"
+    else:
+        python_exe = venv_dir / "bin" / "python"
+
+    if python_exe.exists():
+        # Restart the script using the python executable from the venv
+        os.execv(str(python_exe), [str(python_exe)] + sys.argv)
+
+# Initialize bootstrap before anything else
+bootstrap()
+
+# --- THEME CONFIGURATION ---
+ctk.set_appearance_mode("System")  # Modes: "System" (standard), "Dark", "Light"
+ctk.set_default_color_theme("green")  # Themes: "blue" (standard), "green", "dark-blue"
+
+class VideoOptimizerEngine:
+    def __init__(self, logger_callback=None, progress_callback=None, status_callback=None):
+        self.logger_callback = logger_callback
+        self.progress_callback = progress_callback
+        self.status_callback = status_callback
+        self.stop_requested = False
+        
+        # Defaults (will be overridden by config.json)
+        self.known_extensions = [
+            '.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v', '.ts', '.vob', 
+            '.m2ts', '.mpeg', '.mpg', '.rm', '.rmvb', '.3gp', '.3g2', '.ogv', '.mp4v', '.f4v', 
+            '.asf', '.divx', '.xvid', '.yuv', '.viv', '.mxf'
+        ]
+        
+        self.ignored_extensions = [
+            '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff', '.lnk', '.exe', '.tif', 
+            '.heic', '.ico', '.svg', '.psd', '.ai', '.txt', '.log', '.pdf', '.zip', '.rar', 
+            '.7z', '.iso', '.ps1', '.md', '.json', '.csv', '.xml', '.ini', '.cfg', '.yaml', 
+            '.yml', '.html', '.css', '.js', '.db', '.sqlite', '.bak', '.nef', '.dng', '.arw', 
+            '.xmp', '.mp3', '.wav', '.m4a', '.aac', '.flac', '.cfa', '.pek', '.ffx', '.prfpset', 
+            '.ds_store', '.setting', '.drp', '.cube', '.url', '.drfx', '.ttf', '.otf', '.eot', 
+            '.woff', '.woff2', '.fon', '.ttc', '.compositefont', '.dat', '.htm', '.eps', '.jfif', 
+            '.avif', '.sfk', '.mogrt', '.prproj', '.aep', '.aegraphic', '.aif', '.atn', '.abr', 
+            '.grd', '.pat', '.asl', '.settings', '.zxp', '.rtf', '.plp', '.apk', '.docx', '.atom'
+        ]
+
+        self.efficient_codecs = ['hevc', 'h265', 'av1']
+
+    def log(self, message):
+        if self.logger_callback:
+            self.logger_callback(message)
+        else:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] {message}")
+
+    def update_status(self, status):
+        if self.status_callback:
+            self.status_callback(status)
+
+    def update_progress(self, progress_data):
+        if self.progress_callback:
+            self.progress_callback(progress_data)
+
+    def request_stop(self):
+        self.stop_requested = True
+        self.log("[STOP] Cancellation requested.")
+
+    def get_ffmpeg_encoders(self):
+        try:
+            result = subprocess.run(['ffmpeg', '-encoders'], capture_output=True, text=True, check=True)
+            return result.stdout
+        except Exception as e:
+            self.log(f"[FAIL] Failed to detect encoders: {e}")
+            return ""
+
+    def check_encoder_support(self, codec):
+        encoders = self.get_ffmpeg_encoders()
+        if codec in encoders:
+            # Try a dummy encode to confirm hardware init
+            dummy_args = [
+                'ffmpeg', '-y', '-loglevel', 'error', 
+                '-f', 'lavfi', '-i', 'color=black:s=1280x720:r=24', 
+                '-pix_fmt', 'yuv420p', '-vframes', '1', 
+                '-c:v', codec, '-f', 'null', '-'
+            ]
+            try:
+                subprocess.run(dummy_args, check=True, capture_output=True)
+                return True
+            except subprocess.CalledProcessError:
+                return False
+        return False
+
+    def get_video_duration(self, file_path):
+        try:
+            args = ['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', str(file_path)]
+            result = subprocess.run(args, capture_output=True, text=True, check=True)
+            return float(result.stdout.strip())
+        except:
+            return 60.0
+
+    def get_video_codec(self, file_path):
+        try:
+            args = ['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=codec_name', '-of', 'default=noprint_wrappers=1:nokey=1', str(file_path)]
+            result = subprocess.run(args, capture_output=True, text=True, check=True)
+            return result.stdout.strip().lower()
+        except:
+            return "unknown"
+
+    def get_audio_codec(self, file_path):
+        try:
+            args = ['ffprobe', '-v', 'error', '-select_streams', 'a:0', '-show_entries', 'stream=codec_name', '-of', 'default=noprint_wrappers=1:nokey=1', str(file_path)]
+            result = subprocess.run(args, capture_output=True, text=True, check=True)
+            return result.stdout.strip().lower()
+        except:
+            return "unknown"
+
+    def calculate_vmaf(self, reference, distorted):
+        args = ['ffmpeg', '-i', str(distorted), '-i', str(reference), '-filter_complex', 'libvmaf', '-f', 'null', '-']
+        try:
+            result = subprocess.run(args, capture_output=True, text=True)
+            import re
+            match = re.search(r"VMAF score: (\d+\.\d+)", result.stderr)
+            if match:
+                return float(match.group(1))
+        except Exception as e:
+            self.log(f"[FAIL] VMAF calculation failed: {e}")
+        return None
+
+    def run_vmaf_search(self, file_path, config, target_vmaf=None):
+        if target_vmaf is None:
+            target_vmaf = config.get('VmafTarget', 93)
+            
+        self.log(f"[PROBE] Starting VMAF search (Target: {target_vmaf}) for: {Path(file_path).name}")
+        duration = self.get_video_duration(file_path)
+        samples_count = config.get('VmafSamples', 3)
+        sample_dur = config.get('VmafDur', 5)
+        encoder = config.get('Encoder', 'libx264')
+        preset = config.get('Preset', 'medium')
+        mode_flag = config.get('Mode', 'crf')
+        
+        # Hardware Decode Detection
+        hw_decode_args = []
+        if 'nvenc' in encoder: hw_decode_args = ['-hwaccel', 'cuda']
+        elif 'qsv' in encoder: hw_decode_args = ['-hwaccel', 'qsv']
+        elif 'amf' in encoder: hw_decode_args = ['-hwaccel', 'd3d11va']
+
+        if samples_count == 1:
+            sample_points = [duration / 2]
+        else:
+            sample_points = [(duration / (samples_count + 1)) * i for i in range(1, samples_count + 1)]
+
+        best_cq = 26
+        best_score = 0
+        current_step = 4
+        last_dir = 0
+        current_cq = 26
+        
+        temp_dir = Path(os.environ.get('TEMP', '.'))
+
+        for attempt in range(1, 16):
+            if self.stop_requested:
+                break
+            
+            self.log(f"[PROBE] Pass {attempt}: Probing Visual Fidelity at CQ {current_cq}")
+            scores = []
+            
+            for sp in sample_points:
+                if self.stop_requested:
+                    break
+                
+                uid = str(uuid.uuid4())[:8]
+                sample_src = temp_dir / f"v_s_{uid}.mkv"
+                sample_enc = temp_dir / f"v_e_{uid}.mkv"
+                
+                try:
+                    extract_args = ['ffmpeg', '-y', '-loglevel', 'error'] + hw_decode_args + ['-ss', str(sp), '-t', str(sample_dur), '-i', str(file_path), '-c:v', 'copy', '-an', str(sample_src)]
+                    subprocess.run(extract_args, check=True)
+                    
+                    if self.stop_requested: break
+                    
+                    encode_args = ['ffmpeg', '-y', '-loglevel', 'error'] + hw_decode_args + ['-i', str(sample_src), '-c:v', encoder, '-preset', preset, f"-{mode_flag}", str(current_cq), str(sample_enc)]
+                    subprocess.run(encode_args, check=True)
+                    
+                    if self.stop_requested: break
+                    
+                    score = self.calculate_vmaf(sample_src, sample_enc)
+                    if score is not None:
+                        scores.append(score)
+                        
+                except Exception as e:
+                    self.log(f"[FAIL] Sample processing failed: {e}")
+                finally:
+                    if sample_src.exists(): sample_src.unlink()
+                    if sample_enc.exists(): sample_enc.unlink()
+            
+            if self.stop_requested: break
+            
+            if scores:
+                avg_score = sum(scores) / len(scores)
+                self.log(f"[PROBE] Average Visual Score: {avg_score:.2f}")
+                
+                if abs(avg_score - target_vmaf) < abs(best_score - target_vmaf):
+                    best_cq = current_cq
+                    best_score = avg_score
+                
+                if abs(avg_score - target_vmaf) <= 0.5:
+                    break
+                
+                direction = 1 if avg_score > target_vmaf else -1
+                
+                if last_dir != 0 and direction != last_dir:
+                    if current_step > 1:
+                        current_step //= 2
+                    else:
+                        break
+                
+                last_dir = direction
+                current_cq += (direction * current_step)
+                
+                if current_cq < 0 or current_cq > 51:
+                    break
+            else:
+                break
+                
+        return best_cq, best_score
+
+    def run_ffmpeg_with_progress(self, args, file_index, total_files):
+        cmd = ['ffmpeg', '-progress', 'pipe:1'] + args
+        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, universal_newlines=True)
+        
+        while True:
+            if self.stop_requested:
+                process.terminate()
+                return False
+            
+            line = process.stdout.readline()
+            if not line and process.poll() is not None:
+                break
+            
+            if line:
+                if "out_time=" in line:
+                    self.update_status(f"Processing: {line.strip()}")
+                elif "Error" in line or "failed" in line:
+                    self.log(f"[FFMPEG] {line.strip()}")
+            
+        return process.returncode == 0
+
+    def optimize_file(self, file_info, config, file_index, total_files):
+        file_path = Path(file_info['FullName'])
+        self.log(f"--- [INFO] Processing: {file_path.name} ---")
+        
+        # 1. Cache Skip
+        key = str(file_path).lower()
+        signature = f"{file_info['OldSizeBytes']}|{int(file_path.stat().st_mtime)}"
+        if config.get('ResumeEnabled') and config.get('Cache'):
+            cached = config['Cache'].get(key)
+            if cached and cached.get('Signature') == signature and cached.get('SettingsKey') == config.get('SettingsKey'):
+                self.log("[SKIP] Found in cache with matching settings.")
+                return {'Success': True, 'Msg': 'Cached Skip', 'NewSize': cached.get('NewSize', 0), 'FinalVmaf': cached.get('FinalVmaf', '---')}
+
+        # 2. Codec-Aware Skip
+        source_codec = self.get_video_codec(file_path)
+        target_codec = config['Encoder'].lower()
+        if config.get('SkipEfficient', True):
+            if any(c in source_codec for c in self.efficient_codecs):
+                self.log(f"[SKIP] Source is already efficient ({source_codec}).")
+                return {'Success': True, 'Msg': 'Already Optimized', 'NewSize': file_info['OldSizeBytes'], 'FinalVmaf': '---'}
+
+        res = {'Success': False, 'NewSize': 0, 'Msg': 'Failed', 'FinalVmaf': '---'}
+        
+        container = config.get('Container', '.mp4')
+        if container == 'Original': container = file_path.suffix
+            
+        temp_out = file_path.with_suffix(f"{file_path.suffix}.tmp{container}")
+        final_out = file_path.parent / f"{file_path.stem}_opt{container}"
+        
+        # 3. Hardware Decode Detection
+        hw_decode_args = []
+        if 'nvenc' in target_codec: hw_decode_args = ['-hwaccel', 'cuda']
+        elif 'qsv' in target_codec: hw_decode_args = ['-hwaccel', 'qsv']
+        elif 'amf' in target_codec: hw_decode_args = ['-hwaccel', 'd3d11va']
+
+        # 4. Audio Compatibility Fallback
+        source_audio = self.get_audio_codec(file_path)
+        target_audio_opt = config.get('Audio', 'copy')
+        target_audio_args = []
+
+        if target_audio_opt == 'copy':
+            incompatible = False
+            if container == '.mp4' and not any(a in source_audio for a in ['aac', 'mp3', 'opus', 'ac3', 'eac3', 'mp2', 'mp1']): incompatible = True
+            elif container == '.mov' and not any(a in source_audio for a in ['aac', 'mp3', 'ac3', 'eac3', 'alac', 'pcm']): incompatible = True
+            
+            if incompatible:
+                self.log(f"[WARN] Audio ({source_audio}) incompatible with {container}. Encoding to AAC.")
+                target_audio_args = ['-c:a', 'aac', '-b:a', '128k']
+            else:
+                target_audio_args = ['-c:a', 'copy']
+        else:
+            parts = target_audio_opt.split(' ')
+            target_audio_args = ['-c:a', parts[0], '-b:a', parts[1]]
+
+        # 5. Core Processing Loop
+        if config.get('VmafEnabled'):
+            vmaf_ladder = config.get('VmafLadder', [config.get('VmafTarget', 93)])
+            for target in vmaf_ladder:
+                if self.stop_requested: break
+                
+                best_cq, best_score_val = self.run_vmaf_search(file_path, config, target)
+                res['FinalVmaf'] = f"{best_score_val:.1f}"
+                
+                self.log(f"[ENCODE] Running final encode (VMAF Target: {target}, CQ: {best_cq})...")
+                success = self.execute_encode(file_path, temp_out, hw_decode_args, target_audio_args, config, best_cq, file_index, total_files)
+                
+                if success and temp_out.exists():
+                    val_res = self.validate_output(file_path, temp_out, final_out, file_info)
+                    if val_res['Success']:
+                        res.update(val_res)
+                        break
+                    else:
+                        temp_out.unlink()
+                        self.log(f"[FAIL] VMAF Target {target} yielded larger file or failed validation.")
+                else:
+                    if temp_out.exists(): temp_out.unlink()
+                    self.log(f"[FAIL] Encoding failed for VMAF Target {target}.")
+        else:
+            active_qualities = config.get('QualityLadder', [23, 26, 29])
+            for q in active_qualities:
+                if self.stop_requested: break
+                
+                self.log(f"[ENCODE] Running final encode (CQ: {q})...")
+                success = self.execute_encode(file_path, temp_out, hw_decode_args, target_audio_args, config, q, file_index, total_files)
+                
+                if success and temp_out.exists():
+                    val_res = self.validate_output(file_path, temp_out, final_out, file_info)
+                    if val_res['Success']:
+                        res.update(val_res)
+                        break
+                    else:
+                        temp_out.unlink()
+                else:
+                    if temp_out.exists(): temp_out.unlink()
+
+        # 6. Cache Update
+        if config.get('CacheEnabled'):
+            if not res['Success'] and config.get('OnFail') == 'Ignore':
+                config['Cache'][key] = {
+                    'Path': str(file_path),
+                    'Signature': signature,
+                    'SettingsKey': config.get('SettingsKey'),
+                    'Reason': res.get('Msg', 'Unknown'),
+                    'LastTried': datetime.now().isoformat()
+                }
+            elif res['Success']:
+                config['Cache'][key] = {
+                    'Path': str(file_path),
+                    'Signature': signature,
+                    'SettingsKey': config.get('SettingsKey'),
+                    'Status': 'Optimized',
+                    'NewSize': res['NewSize'],
+                    'FinalVmaf': res['FinalVmaf']
+                }
+            
+            try:
+                with open(config['CacheFile'], 'w') as f:
+                    json.dump(list(config['Cache'].values()), f, indent=4)
+            except:
+                pass
+
+        return res
+
+    def execute_encode(self, file_path, temp_out, hw_decode_args, target_audio_args, config, q, file_index, total_files):
+        target_codec = config['Encoder'].lower()
+        ff_args = ['-y', '-loglevel', 'info'] + hw_decode_args + ['-i', str(file_path), '-c:v', config['Encoder'], f"-{config['Mode']}", str(q)]
+        
+        if config.get('Preset') and config.get('Preset') != 'none':
+            ff_args += ['-preset', config['Preset']]
+        
+        # NVENC Visual Tuning
+        if 'nvenc' in target_codec:
+            ff_args += ['-spatial_aq', '1', '-aq-strength', '8']
+        
+        ff_args += target_audio_args
+        ff_args.append(str(temp_out))
+        
+        return self.run_ffmpeg_with_progress(ff_args, file_index, total_files)
+
+    def validate_output(self, file_path, temp_out, final_out, file_info):
+        self.log("[VALIDATE] Verifying output integrity...")
+        new_size = temp_out.stat().st_size
+        if new_size < file_info['OldSizeBytes']:
+            in_dur = self.get_video_duration(file_path)
+            out_dur = self.get_video_duration(temp_out)
+            if abs(in_dur - out_dur) <= 2.0:
+                temp_out.replace(final_out)
+                self.log(f"[SUCCESS] Optimization complete. Saved {(file_info['OldSizeBytes'] - new_size) / 1024 / 1024:.2f} MB")
+                return {'Success': True, 'NewSize': new_size, 'Msg': 'Optimized'}
+            else:
+                self.log("[FAIL] Duration mismatch detected.")
+                return {'Success': False, 'Msg': 'Duration Mismatch'}
+        else:
+            self.log("[FAIL] Output larger than source.")
+            return {'Success': False, 'Msg': 'Larger than Source'}
+
+    def scan_files(self, path, recursive=True):
+        path = Path(path)
+        if not path.exists():
+            return []
+        
+        files = []
+        pattern = "**/*" if recursive else "*"
+        for f in path.glob(pattern):
+            if f.is_file():
+                ext = f.suffix.lower()
+                if ext in self.ignored_extensions:
+                    continue
+                if ext in self.known_extensions:
+                    files.append({
+                        'Name': f.name,
+                        'FullName': str(f),
+                        'Directory': str(f.parent),
+                        'Extension': f.suffix,
+                        'OldSize': self.format_bytes(f.stat().st_size),
+                        'OldSizeBytes': f.stat().st_size,
+                        'NewSize': '---',
+                        'Saving': '---',
+                        'Status': 'Queued'
+                    })
+        return files
+
+    def format_bytes(self, size):
+        for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+            if size < 1024.0:
+                return f"{size:.2f} {unit}"
+            size /= 1024.0
+        return f"{size:.2f} PB"
+
+class VideoOptimizerGUI(ctk.CTk):
+    def __init__(self):
+        super().__init__()
+
+        self.title("Ultimate Video Optimizer Pro")
+        self.geometry("1200x900")
+
+        self.engine = VideoOptimizerEngine(
+            logger_callback=self.add_log,
+            status_callback=self.update_status_label,
+            progress_callback=self.update_progress
+        )
+
+        self.video_files = []
+        self.is_processing = False
+        self.total_saved_bytes = 0
+        self.total_original_bytes = 0
+        self.processed_count = 0
+        
+        # Internal App Data
+        self.app_dir = Path(os.environ.get('APPDATA', '.')) / "Video Optimizer"
+        self.config_file = self.app_dir / "config.json"
+        if not self.app_dir.exists(): self.app_dir.mkdir(parents=True)
+
+        self.setup_ui()
+        self.update_treeview_style()
+        self.detect_encoders()
+        self.load_config() # Load after UI setup to populate fields
+        self.scan_files()
+
+    def setup_ui(self):
+        # Configure grid layout (1x2)
+        self.grid_columnconfigure(0, weight=0) # Sidebar
+        self.grid_columnconfigure(1, weight=1) # Main Content
+        self.grid_rowconfigure(0, weight=1)
+
+        # --- SIDEBAR (SETTINGS) ---
+        self.sidebar = ctk.CTkScrollableFrame(self, width=400, corner_radius=0)
+        self.sidebar.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)
+        
+        self.logo_label = ctk.CTkLabel(self.sidebar, text="VIDEO OPTIMIZER PRO", font=ctk.CTkFont(size=20, weight="bold"))
+        self.logo_label.pack(pady=(20, 10), padx=20)
+        
+        self.sub_logo_label = ctk.CTkLabel(self.sidebar, text="Expert FFmpeg Workflow", font=ctk.CTkFont(size=12))
+        self.sub_logo_label.pack(pady=(0, 20), padx=20)
+
+        # 1. SOURCE & ENGINE
+        self.setup_section_label("1. SOURCE & ENGINE")
+        
+        self.path_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
+        self.path_frame.pack(fill="x", padx=20, pady=5)
+        self.entry_path = ctk.CTkEntry(self.path_frame, placeholder_text="Select folder...")
+        self.entry_path.pack(side="left", fill="x", expand=True, padx=(0, 5))
+        self.entry_path.insert(0, os.getcwd())
+        self.btn_browse = ctk.CTkButton(self.path_frame, text="Browse", width=70, command=self.browse_folder)
+        self.btn_browse.pack(side="right")
+
+        self.engine_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
+        self.engine_frame.pack(fill="x", padx=20, pady=5)
+        
+        self.lbl_encoder = ctk.CTkLabel(self.engine_frame, text="Encoder", font=ctk.CTkFont(size=10))
+        self.lbl_encoder.grid(row=0, column=0, sticky="w")
+        self.combo_encoder = ctk.CTkComboBox(self.engine_frame, values=["Detecting..."], command=self.on_encoder_change)
+        self.combo_encoder.grid(row=1, column=0, sticky="ew", padx=(0, 5))
+        
+        self.lbl_container = ctk.CTkLabel(self.engine_frame, text="Container", font=ctk.CTkFont(size=10))
+        self.lbl_container.grid(row=0, column=1, sticky="w")
+        self.combo_container = ctk.CTkComboBox(self.engine_frame, values=["MP4", "MKV", "MOV", "Original"])
+        self.combo_container.grid(row=1, column=1, sticky="ew", padx=(5, 0))
+        self.combo_container.set("MP4")
+        self.engine_frame.grid_columnconfigure(0, weight=1)
+        self.engine_frame.grid_columnconfigure(1, weight=1)
+
+        self.chk_recursive = ctk.CTkCheckBox(self.sidebar, text="Recursive Scan")
+        self.chk_recursive.pack(padx=20, pady=5, anchor="w")
+        self.chk_recursive.select()
+        
+        self.chk_vmaf = ctk.CTkCheckBox(self.sidebar, text="Enable Advanced VMAF", text_color="#2DA44E", font=ctk.CTkFont(weight="bold"), command=self.toggle_vmaf_card)
+        self.chk_vmaf.pack(padx=20, pady=5, anchor="w")
+        self.chk_vmaf.select()
+
+        # 2. VMAF TUNING / MANUAL
+        self.vmaf_card = ctk.CTkFrame(self.sidebar)
+        self.vmaf_card.pack(fill="x", padx=20, pady=10)
+        self.setup_card_label(self.vmaf_card, "2. ADVANCED VMAF TUNING")
+        
+        self.vmaf_target_frame = ctk.CTkFrame(self.vmaf_card, fg_color="transparent")
+        self.vmaf_target_frame.pack(fill="x", padx=10, pady=2)
+        ctk.CTkLabel(self.vmaf_target_frame, text="Target Quality (VMAF)", font=ctk.CTkFont(size=10)).pack(side="left")
+        self.lbl_vmaf_val = ctk.CTkLabel(self.vmaf_target_frame, text="93", font=ctk.CTkFont(weight="bold"), text_color="#2DA44E")
+        self.lbl_vmaf_val.pack(side="right")
+        
+        self.slider_vmaf = ctk.CTkSlider(self.vmaf_card, from_=70, to=100, number_of_steps=30, command=self.update_vmaf_label)
+        self.slider_vmaf.pack(fill="x", padx=10, pady=5)
+        self.slider_vmaf.set(93)
+
+        ctk.CTkLabel(self.vmaf_card, text="VMAF Target Ladder (Comma Separated)", font=ctk.CTkFont(size=10)).pack(padx=10, anchor="w")
+        self.entry_vmaf_ladder = ctk.CTkEntry(self.vmaf_card, placeholder_text="e.g. 95, 93, 91")
+        self.entry_vmaf_ladder.pack(fill="x", padx=10, pady=(0, 5))
+        self.entry_vmaf_ladder.insert(0, "93")
+
+        self.vmaf_opt_frame = ctk.CTkFrame(self.vmaf_card, fg_color="transparent")
+        self.vmaf_opt_frame.pack(fill="x", padx=10, pady=5)
+        self.combo_samples = ctk.CTkComboBox(self.vmaf_opt_frame, values=["1 Sample", "3 Samples (Balanced)", "5 Samples"])
+        self.combo_samples.set("3 Samples (Balanced)")
+        self.combo_samples.pack(side="left", fill="x", expand=True, padx=(0, 2))
+        self.combo_probe = ctk.CTkComboBox(self.vmaf_opt_frame, values=["3 Seconds", "5 Seconds", "10 Seconds"])
+        self.combo_probe.set("5 Seconds")
+        self.combo_probe.pack(side="right", fill="x", expand=True, padx=(2, 0))
+
+        self.manual_card = ctk.CTkFrame(self.sidebar)
+        # Hidden initially
+        self.setup_card_label(self.manual_card, "2. MANUAL QUALITY LADDER")
+        self.entry_ladder = ctk.CTkEntry(self.manual_card, placeholder_text="23,26,29")
+        self.entry_ladder.insert(0, "23,26,29")
+        self.entry_ladder.pack(fill="x", padx=10, pady=5)
+        ctk.CTkLabel(self.manual_card, text="Speed Preset", font=ctk.CTkFont(size=10)).pack(padx=10, anchor="w")
+        self.combo_preset = ctk.CTkComboBox(self.manual_card, values=["medium"])
+        self.combo_preset.pack(fill="x", padx=10, pady=5)
+
+        # 3. AUDIO & SKIP LOGIC
+        self.setup_section_label("3. AUDIO & SKIP LOGIC")
+        self.combo_audio = ctk.CTkComboBox(self.sidebar, values=["Copy (Original)", "AAC (128k)", "AAC (192k)"])
+        self.combo_audio.set("Copy (Original)")
+        self.combo_audio.pack(fill="x", padx=20, pady=5)
+        
+        self.chk_skip_efficient = ctk.CTkCheckBox(self.sidebar, text="Skip Efficient Codecs (HEVC/AV1)")
+        self.chk_skip_efficient.pack(padx=20, pady=5, anchor="w")
+        self.chk_skip_efficient.select()
+
+        self.lbl_on_fail = ctk.CTkLabel(self.sidebar, text="On Failure", font=ctk.CTkFont(size=10))
+        self.lbl_on_fail.pack(padx=20, anchor="w")
+        self.combo_on_fail = ctk.CTkComboBox(self.sidebar, values=["Move to 'Unoptimizable'", "Delete File", "Ignore (Keep Original)"])
+        self.combo_on_fail.set("Move to 'Unoptimizable'")
+        self.combo_on_fail.pack(fill="x", padx=20, pady=5)
+
+        # 4. SESSION OPTIONS
+        self.setup_section_label("4. SESSION OPTIONS")
+        self.chk_resume = ctk.CTkCheckBox(self.sidebar, text="Enable Resume Functionality")
+        self.chk_resume.pack(padx=20, pady=5, anchor="w")
+        self.chk_resume.select()
+        self.chk_cache = ctk.CTkCheckBox(self.sidebar, text="Enable Cache")
+        self.chk_cache.pack(padx=20, pady=5, anchor="w")
+        self.chk_cache.select()
+        self.chk_log = ctk.CTkCheckBox(self.sidebar, text="Enable Log")
+        self.chk_log.pack(padx=20, pady=5, anchor="w")
+        self.chk_log.select()
+
+        # --- MAIN CONTENT ---
+        self.main_frame = ctk.CTkFrame(self, corner_radius=0, fg_color="transparent")
+        self.main_frame.grid(row=0, column=1, sticky="nsew", padx=30, pady=30)
+        self.main_frame.grid_rowconfigure(1, weight=1)
+        self.main_frame.grid_columnconfigure(0, weight=1)
+
+        # Stats Dashboard
+        self.stats_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
+        self.stats_frame.grid(row=0, column=0, sticky="ew", pady=(0, 20))
+        for i in range(4): self.stats_frame.grid_columnconfigure(i, weight=1)
+
+        self.stat_files = self.create_stat_card(self.stats_frame, 0, "FILES", "0")
+        self.stat_saved = self.create_stat_card(self.stats_frame, 1, "SAVED", "0 MB", color="#2DA44E")
+        self.stat_eff = self.create_stat_card(self.stats_frame, 2, "EFFICIENCY", "0%", color="#0969DA")
+        self.stat_vmaf = self.create_stat_card(self.stats_frame, 3, "VMAF", "---")
+
+        # File List
+        self.table_frame = ctk.CTkFrame(self.main_frame)
+        self.table_frame.grid(row=1, column=0, sticky="nsew")
+        
+        self.tree = ttk.Treeview(self.table_frame, columns=("Filename", "Old Size", "New Size", "Saving", "Status"), show="headings")
+        self.tree.heading("Filename", text="Filename")
+        self.tree.heading("Old Size", text="Old Size")
+        self.tree.heading("New Size", text="New Size")
+        self.tree.heading("Saving", text="Saving")
+        self.tree.heading("Status", text="Status")
+        self.tree.column("Filename", width=300)
+        self.tree.column("Old Size", width=80)
+        self.tree.column("New Size", width=80)
+        self.tree.column("Saving", width=70)
+        self.tree.column("Status", width=100)
+        
+        self.tree_scroll = ttk.Scrollbar(self.table_frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=self.tree_scroll.set)
+        
+        self.tree.pack(side="left", fill="both", expand=True)
+        self.tree_scroll.pack(side="right", fill="y")
+
+        # Logs
+        self.log_text = ctk.CTkTextbox(self.main_frame, height=200, font=ctk.CTkFont(family="Consolas", size=11))
+        self.log_text.grid(row=2, column=0, sticky="ew", pady=(20, 0))
+
+        # Bottom Bar
+        self.bottom_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
+        self.bottom_frame.grid(row=3, column=0, sticky="ew", pady=(20, 0))
+        self.bottom_frame.grid_columnconfigure(0, weight=1)
+
+        self.progress_bar = ctk.CTkProgressBar(self.bottom_frame, width=400)
+        self.progress_bar.grid(row=0, column=0, sticky="w")
+        self.progress_bar.set(0)
+        
+        self.lbl_status = ctk.CTkLabel(self.bottom_frame, text="Ready", font=ctk.CTkFont(size=12, weight="bold"))
+        self.lbl_status.grid(row=1, column=0, sticky="w")
+
+        self.btn_stop = ctk.CTkButton(self.bottom_frame, text="STOP", fg_color="#CF222E", hover_color="#A51B25", width=280, height=45, font=ctk.CTkFont(size=14, weight="bold"), command=self.stop_optimization)
+        self.btn_stop.grid(row=0, column=1, rowspan=2)
+        self.btn_stop.grid_remove()
+
+        self.btn_start = ctk.CTkButton(self.bottom_frame, text="START PRO OPTIMIZATION", width=280, height=45, font=ctk.CTkFont(size=14, weight="bold"), command=self.start_optimization)
+        self.btn_start.grid(row=0, column=1, rowspan=2)
+
+    def update_treeview_style(self):
+        style = ttk.Style()
+        theme = ctk.get_appearance_mode()
+        
+        if theme == "Dark":
+            bg_color = "#2b2b2b"
+            fg_color = "white"
+            selected_color = "#1f538d"
+            header_bg = "#333333"
+        else:
+            bg_color = "#ffffff"
+            fg_color = "black"
+            selected_color = "#97bc62"
+            header_bg = "#e1e1e1"
+
+        style.theme_use("default")
+        style.configure("Treeview", 
+                        background=bg_color, 
+                        foreground=fg_color, 
+                        fieldbackground=bg_color,
+                        borderwidth=0,
+                        font=("Segoe UI", 9))
+        style.map("Treeview", background=[('selected', selected_color)])
+        style.configure("Treeview.Heading", 
+                        background=header_bg, 
+                        foreground=fg_color, 
+                        relief="flat",
+                        font=("Segoe UI", 9, "bold"))
+
+    def setup_section_label(self, text):
+        lbl = ctk.CTkLabel(self.sidebar, text=text, font=ctk.CTkFont(size=11, weight="bold"), text_color="gray")
+        lbl.pack(pady=(20, 5), padx=20, anchor="w")
+
+    def setup_card_label(self, parent, text):
+        lbl = ctk.CTkLabel(parent, text=text, font=ctk.CTkFont(size=11, weight="bold"), text_color="gray")
+        lbl.pack(pady=(10, 5), padx=10, anchor="w")
+
+    def create_stat_card(self, parent, col, title, value, color=None):
+        card = ctk.CTkFrame(parent)
+        card.grid(row=0, column=col, padx=5, sticky="ew")
+        ctk.CTkLabel(card, text=title, font=ctk.CTkFont(size=9, weight="bold"), text_color="gray").pack(pady=(5, 0))
+        val_lbl = ctk.CTkLabel(card, text=value, font=ctk.CTkFont(size=20, weight="bold"), text_color=color)
+        val_lbl.pack(pady=(0, 5))
+        return val_lbl
+
+    def update_vmaf_label(self, val):
+        self.lbl_vmaf_val.configure(text=str(int(val)))
+        # Sync ladder entry if only one value
+        if "," not in self.entry_vmaf_ladder.get():
+            self.entry_vmaf_ladder.delete(0, "end")
+            self.entry_vmaf_ladder.insert(0, str(int(val)))
+
+    def toggle_vmaf_card(self):
+        if self.chk_vmaf.get():
+            self.vmaf_card.pack(fill="x", padx=20, pady=10, after=self.chk_vmaf)
+            self.manual_card.pack_forget()
+        else:
+            self.vmaf_card.pack_forget()
+            self.manual_card.pack(fill="x", padx=20, pady=10, after=self.chk_vmaf)
+
+    def browse_folder(self):
+        path = filedialog.askdirectory()
+        if path:
+            self.entry_path.delete(0, "end")
+            self.entry_path.insert(0, path)
+            self.scan_files()
+
+    def scan_files(self):
+        path = self.entry_path.get()
+        if not path: return
+        self.video_files = self.engine.scan_files(path, self.chk_recursive.get())
+        self.stat_files.configure(text=str(len(self.video_files)))
+        
+        # Clear tree
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+            
+        for f in self.video_files:
+            self.tree.insert("", "end", values=(f['Name'], f['OldSize'], f['NewSize'], f['Saving'], f['Status']))
+
+    def load_config(self):
+        if self.config_file.exists():
+            try:
+                with open(self.config_file, 'r') as f:
+                    config = json.load(f)
+                    
+                # Apply config to UI
+                if 'LastPath' in config:
+                    self.entry_path.delete(0, "end")
+                    self.entry_path.insert(0, config['LastPath'])
+                
+                if 'Encoder' in config:
+                    # Find display name for codec
+                    disp = next((e['Name'] for e in self.encoders_data if e['Codec'] == config['Encoder']), None)
+                    if disp:
+                        # Try to find the exact name in combo values (which might have (Unsupported))
+                        matching = [v for v in self.combo_encoder.cget("values") if v.startswith(disp)]
+                        if matching:
+                            self.combo_encoder.set(matching[0])
+                            self.on_encoder_change(matching[0])
+
+                if 'Container' in config: self.combo_container.set(config['Container'])
+                if 'Recursive' in config: 
+                    if config['Recursive']: self.chk_recursive.select()
+                    else: self.chk_recursive.deselect()
+                if 'VmafEnabled' in config:
+                    if config['VmafEnabled']: self.chk_vmaf.select()
+                    else: self.chk_vmaf.deselect()
+                    self.toggle_vmaf_card()
+                if 'VmafTarget' in config:
+                    self.slider_vmaf.set(config['VmafTarget'])
+                    self.update_vmaf_label(config['VmafTarget'])
+                if 'VmafLadder' in config:
+                    self.entry_vmaf_ladder.delete(0, "end")
+                    self.entry_vmaf_ladder.insert(0, ", ".join(map(str, config['VmafLadder'])))
+                if 'QualityLadder' in config:
+                    self.entry_ladder.delete(0, "end")
+                    self.entry_ladder.insert(0, ", ".join(map(str, config['QualityLadder'])))
+                if 'Preset' in config: self.combo_preset.set(config['Preset'])
+                if 'Audio' in config: self.combo_audio.set(config['Audio'])
+                if 'SkipEfficient' in config:
+                    if config['SkipEfficient']: self.chk_skip_efficient.select()
+                    else: self.chk_skip_efficient.deselect()
+                if 'OnFail' in config: self.combo_on_fail.set(config['OnFail'])
+                if 'Resume' in config:
+                    if config['Resume']: self.chk_resume.select()
+                    else: self.chk_resume.deselect()
+                if 'Cache' in config:
+                    if config['Cache']: self.chk_cache.select()
+                    else: self.chk_cache.deselect()
+                
+                # Update Engine's default lists if present in config
+                if 'KnownExtensions' in config: self.engine.known_extensions = config['KnownExtensions']
+                if 'IgnoredExtensions' in config: self.engine.ignored_extensions = config['IgnoredExtensions']
+                if 'EfficientCodecs' in config: self.engine.efficient_codecs = config['EfficientCodecs']
+
+                self.add_log("[INFO] Configuration loaded.")
+            except Exception as e:
+                self.add_log(f"[WARN] Failed to load config: {e}")
+        else:
+            self.save_config() # Create default config
+
+    def save_config(self):
+        try:
+            sel_enc_name = self.combo_encoder.get().replace(" (Unsupported)", "")
+            sel_enc = next((e for e in self.encoders_data if e['Name'] == sel_enc_name), {'Codec': 'libx264'})
+            
+            config = {
+                'LastPath': self.entry_path.get(),
+                'Encoder': sel_enc['Codec'],
+                'Container': self.combo_container.get(),
+                'Recursive': bool(self.chk_recursive.get()),
+                'VmafEnabled': bool(self.chk_vmaf.get()),
+                'VmafTarget': int(self.slider_vmaf.get()),
+                'VmafLadder': [int(x.strip()) for x in self.entry_vmaf_ladder.get().split(',') if x.strip().isdigit()],
+                'QualityLadder': [int(x.strip()) for x in self.entry_ladder.get().split(',') if x.strip().isdigit()],
+                'Preset': self.combo_preset.get(),
+                'Audio': self.combo_audio.get(),
+                'SkipEfficient': bool(self.chk_skip_efficient.get()),
+                'OnFail': self.combo_on_fail.get(),
+                'Resume': bool(self.chk_resume.get()),
+                'Cache': bool(self.chk_cache.get()),
+                'KnownExtensions': self.engine.known_extensions,
+                'IgnoredExtensions': self.engine.ignored_extensions,
+                'EfficientCodecs': self.engine.efficient_codecs
+            }
+            
+            with open(self.config_file, 'w') as f:
+                json.dump(config, f, indent=4)
+        except Exception as e:
+            self.add_log(f"[FAIL] Failed to save config: {e}")
+
+    def detect_encoders(self):
+        self.add_log("[PROBE] Detecting hardware encoders...")
+        self.encoders_data = [
+            {"Name": "NVIDIA AV1 (NVENC)", "Codec": "av1_nvenc", "Mode": "cq"},
+            {"Name": "NVIDIA HEVC (NVENC)", "Codec": "hevc_nvenc", "Mode": "cq"},
+            {"Name": "NVIDIA H.264 (NVENC)", "Codec": "h264_nvenc", "Mode": "cq"},
+            {"Name": "AMD AV1 (AMF)", "Codec": "av1_amf", "Mode": "qp"},
+            {"Name": "AMD HEVC (AMF)", "Codec": "hevc_amf", "Mode": "qp"},
+            {"Name": "AMD H.264 (AMF)", "Codec": "h264_amf", "Mode": "qp"},
+            {"Name": "Intel AV1 (QSV)", "Codec": "av1_qsv", "Mode": "global_quality"},
+            {"Name": "Intel HEVC (QSV)", "Codec": "hevc_qsv", "Mode": "global_quality"},
+            {"Name": "Intel H.264 (QSV)", "Codec": "h264_qsv", "Mode": "global_quality"},
+            {"Name": "AV1 SVT (CPU)", "Codec": "libsvtav1", "Mode": "crf"},
+            {"Name": "HEVC (CPU - libx265)", "Codec": "libx265", "Mode": "crf"},
+            {"Name": "H.264 (CPU - libx264)", "Codec": "libx264", "Mode": "crf"}
+        ]
+        
+        display_list = []
+        supported_count = 0
+        for enc in self.encoders_data:
+            if self.engine.check_encoder_support(enc['Codec']):
+                display_list.append(enc['Name'])
+                supported_count += 1
+            else:
+                display_list.append(f"{enc['Name']} (Unsupported)")
+            
+        self.combo_encoder.configure(values=display_list)
+        
+        # Set first supported encoder as default
+        default_enc = next((name for name in display_list if "(Unsupported)" not in name), display_list[-1])
+        self.combo_encoder.set(default_enc)
+        self.on_encoder_change(default_enc)
+        
+        self.add_log(f"[SUCCESS] FFmpeg Engine Initialized & Ready. ({supported_count} HW Encoders Detected)")
+
+    def on_encoder_change(self, choice):
+        # Update presets based on choice
+        clean_choice = choice.replace(" (Unsupported)", "")
+        codec = next((e['Codec'] for e in self.encoders_data if e['Name'] == clean_choice), "libx264")
+        if "nvenc" in codec:
+            presets = ["p1","p2","p3","p4","p5","p6","p7"]
+            def_p = "p5"
+        elif "amf" in codec:
+            presets = ["speed", "balanced", "quality"]
+            def_p = "balanced"
+        elif "libsvtav1" in codec:
+            presets = [str(i) for i in range(14)]
+            def_p = "6"
+        else:
+            presets = ["ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow"]
+            def_p = "slow"
+            
+        self.combo_preset.configure(values=presets)
+        self.combo_preset.set(def_p)
+
+    def add_log(self, msg):
+        ts = datetime.now().strftime('%H:%M:%S')
+        self.log_text.insert("end", f"{ts} - {msg}\n")
+        self.log_text.see("end")
+
+    def update_status_label(self, status):
+        self.lbl_status.configure(text=status)
+
+    def update_progress(self, progress_data):
+        # Implement progress update if engine sends detailed data
+        pass
+
+    def start_optimization(self):
+        if self.is_processing or not self.video_files:
+            if not self.video_files: self.add_log("[WARN] No files to process.")
+            return
+            
+        sel_enc_name = self.combo_encoder.get()
+        if "(Unsupported)" in sel_enc_name:
+            self.add_log(f"[FAIL] Selected encoder '{sel_enc_name}' is not supported by your system.")
+            return
+
+        self.save_config() # Auto-save before starting
+
+        self.is_processing = True
+        self.engine.stop_requested = False
+        self.btn_start.grid_remove()
+        self.btn_stop.grid()
+        self.btn_stop.configure(state="normal")
+        
+        # Build config
+        sel_enc_clean = sel_enc_name.replace(" (Unsupported)", "")
+        sel_enc = next(e for e in self.encoders_data if e['Name'] == sel_enc_clean)
+        
+        container = self.combo_container.get()
+        if container == "MP4": container = ".mp4"
+        elif container == "MKV": container = ".mkv"
+        elif container == "MOV": container = ".mov"
+        
+        audio = self.combo_audio.get()
+        if "128k" in audio: audio = "aac 128k"
+        elif "192k" in audio: audio = "aac 192k"
+        else: audio = "copy"
+
+        config = {
+            "Encoder": sel_enc['Codec'],
+            "Mode": sel_enc['Mode'],
+            "VmafEnabled": self.chk_vmaf.get(),
+            "VmafTarget": int(self.slider_vmaf.get()),
+            "VmafLadder": sorted([int(x.strip()) for x in self.entry_vmaf_ladder.get().split(',') if x.strip().isdigit()], reverse=True),
+            "VmafSamples": 1 if "1 Sample" in self.combo_samples.get() else (5 if "5 Samples" in self.combo_samples.get() else 3),
+            "VmafDur": 3 if "3 Seconds" in self.combo_probe.get() else (10 if "10 Seconds" in self.combo_probe.get() else 5),
+            "QualityLadder": sorted([int(x.strip()) for x in self.entry_ladder.get().split(',') if x.strip().isdigit()]),
+            "Preset": self.combo_preset.get(),
+            "Container": container,
+            "Audio": audio,
+            "SkipEfficient": bool(self.chk_skip_efficient.get()),
+            "OnFail": self.combo_on_fail.get(),
+            "ResumeEnabled": self.chk_resume.get(),
+            "CacheEnabled": self.chk_cache.get(),
+            "LogEnabled": self.chk_log.get(),
+            "SettingsKey": f"{sel_enc['Codec']}|{self.combo_preset.get()}|{self.entry_vmaf_ladder.get()}|{audio}",
+            "CacheFile": os.path.join(self.entry_path.get(), ".Video Optimizer", "Cache.json"),
+            "Cache": {}
+        }
+
+        # Ensure work dir
+        work_dir = os.path.join(self.entry_path.get(), ".Video Optimizer")
+        if not os.path.exists(work_dir):
+            os.makedirs(work_dir)
+
+        # Load Cache
+        if config['ResumeEnabled'] and os.path.exists(config['CacheFile']):
+            try:
+                with open(config['CacheFile'], 'r') as f:
+                    content = f.read().strip()
+                    if content:
+                        cache_list = json.loads(content)
+                        if isinstance(cache_list, list):
+                            config['Cache'] = {item['Path'].lower(): item for item in cache_list if isinstance(item, dict) and 'Path' in item}
+                        else:
+                            self.add_log("[WARN] Cache format invalid, starting fresh.")
+            except Exception as e:
+                self.add_log(f"[WARN] Cache load failed ({e}), starting fresh.")
+                config['Cache'] = {}
+
+        self.processed_count = 0
+        self.total_saved_bytes = 0
+        self.total_original_bytes = 0
+        
+        threading.Thread(target=self.optimization_thread, args=(config,), daemon=True).start()
+
+    def optimization_thread(self, config):
+        try:
+            total = len(self.video_files)
+            for i, f in enumerate(self.video_files):
+                if self.engine.stop_requested: break
+                
+                # Update Treeview status
+                self.update_tree_item(i, status="In Progress")
+                
+                res = self.engine.optimize_file(f, config, i, total)
+                
+                if res['Success']:
+                    self.processed_count += 1
+                    saving_bytes = f['OldSizeBytes'] - res['NewSize']
+                    self.total_saved_bytes += saving_bytes
+                    self.total_original_bytes += f['OldSizeBytes']
+                    
+                    saving_pct = (saving_bytes / f['OldSizeBytes']) * 100
+                    self.update_tree_item(i, new_size=self.engine.format_bytes(res['NewSize']), saving=f"{saving_pct:.1f}%", status="Done")
+                    
+                    # Update Stats
+                    self.after(0, self.update_stats)
+                else:
+                    self.update_tree_item(i, status=res['Msg'])
+
+                pct = (i + 1) / total
+                self.after(0, lambda p=pct: self.progress_bar.set(p))
+                if res.get('FinalVmaf') != '---':
+                    self.after(0, lambda v=res['FinalVmaf']: self.stat_vmaf.configure(text=v))
+        except Exception as e:
+            self.add_log(f"[CRITICAL] Thread Error: {e}")
+        finally:
+            self.after(0, self.finish_optimization)
+
+    def update_tree_item(self, index, **kwargs):
+        item_id = self.tree.get_children()[index]
+        values = list(self.tree.item(item_id, "values"))
+        if "new_size" in kwargs: values[2] = kwargs["new_size"]
+        if "saving" in kwargs: values[3] = kwargs["saving"]
+        if "status" in kwargs: values[4] = kwargs["status"]
+        self.after(0, lambda: self.tree.item(item_id, values=values))
+
+    def update_stats(self):
+        self.stat_saved.configure(text=self.engine.format_bytes(self.total_saved_bytes))
+        if self.total_original_bytes > 0:
+            eff = (self.total_saved_bytes / self.total_original_bytes) * 100
+            self.stat_eff.configure(text=f"{eff:.1f}%")
+
+    def finish_optimization(self):
+        self.is_processing = False
+        self.btn_stop.grid_remove()
+        self.btn_start.grid()
+        self.btn_start.configure(state="normal")
+        status = "Finished" if not self.engine.stop_requested else "Stopped"
+        self.update_status_label(status)
+        self.add_log(f">>> Process {status}")
+
+    def stop_optimization(self):
+        self.engine.request_stop()
+        self.btn_stop.configure(state="disabled")
+        self.update_status_label("Stopping... Please wait.")
+        # Proactively swap back but keep disabled until cleanup is done
+        self.btn_stop.grid_remove()
+        self.btn_start.grid()
+        self.btn_start.configure(state="disabled")
+
+if __name__ == "__main__":
+    app = VideoOptimizerGUI()
+    app.mainloop()

@@ -1,54 +1,52 @@
 @echo off
 setlocal
+cd /d "%~dp0"
 
-set "SCRIPT_DIR=%~dp0"
-set "SCRIPT_PATH=%SCRIPT_DIR%Video Optimizer.ps1"
-set "POWERSHELL_EXE="
+:: Set Title
+title Video Optimizer Pro - Smart Launcher
 
-if not exist "%SCRIPT_PATH%" (
-    echo PowerShell script not found:
-    echo "%SCRIPT_PATH%"
-    pause
-    exit /b 1
-)
+:: Preference: PowerShell 7 (pwsh), Fallback: Windows PowerShell
+set "PS_CMD=powershell"
+where pwsh >nul 2>&1 && set "PS_CMD=pwsh"
 
-if exist "%ProgramFiles%\PowerShell" (
-    for /f "delims=" %%V in ('dir /b /ad "%ProgramFiles%\PowerShell" 2^>nul ^| sort /r') do (
-        if not defined POWERSHELL_EXE if exist "%ProgramFiles%\PowerShell\%%V\pwsh.exe" set "POWERSHELL_EXE=%ProgramFiles%\PowerShell\%%V\pwsh.exe"
-    )
-)
+:: Execute the Smart Launcher logic via PowerShell
+%PS_CMD% -NoProfile -ExecutionPolicy Bypass -Command ^
+    "$repoDir = '%~dp0';" ^
+    "$pythonScript = 'Video-Optimizer-GUI.py';" ^
+    "$cliScript = 'Video-Optimizer.ps1';" ^
+    "function Write-Header { param($t) Write-Host \"`n-- $t --\" -ForegroundColor Cyan };" ^
+    "function Check-Python { try { python --version >$null 2>&1; return $true } catch { return $false } };" ^
+    "Write-Header 'Video Optimizer Pro Launcher';" ^
+    "if (-not (Check-Python)) {" ^
+    "    Write-Host '[!] Python is missing.' -ForegroundColor Yellow;" ^
+    "    Write-Host '    1. Install Python via Winget (System-wide, Recommended)' -ForegroundColor White;" ^
+    "    Write-Host '    2. Download Portable Python (Local, No Install)' -ForegroundColor White;" ^
+    "    Write-Host '    3. Use PowerShell CLI Version (No Python needed)' -ForegroundColor White;" ^
+    "    $choice = Read-Host 'Select Option (1-3)';" ^
+    "    if ($choice -eq '1') {" ^
+    "        Write-Host '[INFO] Running: winget install Python.Python.3.11' -ForegroundColor Gray;" ^
+    "        winget install Python.Python.3.11; if ($LASTEXITCODE -ne 0) { Write-Host '[ERROR] Winget failed.' -ForegroundColor Red }" ^
+    "    } elseif ($choice -eq '2') {" ^
+    "        Write-Host '[INFO] Portable Python setup is not yet automated. Falling back to CLI...' -ForegroundColor Gray;" ^
+    "        $choice = '3'" ^
+    "    }" ^
+    "    if ($choice -eq '3') {" ^
+    "        Write-Host '[INFO] Launching PowerShell CLI Version...' -ForegroundColor Green;" ^
+    "        & $repoDir\$cliScript; exit" ^
+    "    }" ^
+    "}" ^
+    "if (Check-Python) {" ^
+    "    if (-not (Test-Path '.venv')) {" ^
+    "        Write-Host '[INFO] Creating virtual environment...' -ForegroundColor Gray;" ^
+    "        python -m venv .venv" ^
+    "    }" ^
+    "    Write-Host '[INFO] Activating environment and checking requirements...' -ForegroundColor Gray;" ^
+    "    & \".venv\Scripts\python.exe\" -m pip install -r requirements.txt --quiet;" ^
+    "    Write-Host '[SUCCESS] Launching Python GUI...' -ForegroundColor Green;" ^
+    "    & \".venv\Scripts\python.exe\" $pythonScript;" ^
+    "} else {" ^
+    "    Write-Host '[CRITICAL] Python still not found. Falling back to CLI...' -ForegroundColor Red;" ^
+    "    & $repoDir\$cliScript" ^
+    "}"
 
-if defined ProgramFiles^(x86^) if exist "%ProgramFiles(x86)%\PowerShell" (
-    for /f "delims=" %%V in ('dir /b /ad "%ProgramFiles(x86)%\PowerShell" 2^>nul ^| sort /r') do (
-        if not defined POWERSHELL_EXE if exist "%ProgramFiles(x86)%\PowerShell\%%V\pwsh.exe" set "POWERSHELL_EXE=%ProgramFiles(x86)%\PowerShell\%%V\pwsh.exe"
-    )
-)
-
-for /f "delims=" %%P in ('where pwsh.exe 2^>nul') do (
-    if not defined POWERSHELL_EXE set "POWERSHELL_EXE=%%P"
-)
-
-if not defined POWERSHELL_EXE (
-    for /f "delims=" %%P in ('where powershell.exe 2^>nul') do (
-        if not defined POWERSHELL_EXE set "POWERSHELL_EXE=%%P"
-    )
-)
-
-if not defined POWERSHELL_EXE (
-    echo PowerShell was not found on this system.
-    pause
-    exit /b 1
-)
-
-pushd "%SCRIPT_DIR%" >nul
-"%POWERSHELL_EXE%" -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_PATH%" %*
-set "EXIT_CODE=%ERRORLEVEL%"
-popd >nul
-
-if not "%EXIT_CODE%"=="0" (
-    echo.
-    echo Video Optimizer exited with code %EXIT_CODE%.
-    pause
-)
-
-exit /b %EXIT_CODE%
+if %errorlevel% neq 0 pause
